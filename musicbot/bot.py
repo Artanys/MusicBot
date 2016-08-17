@@ -24,6 +24,7 @@ from collections import defaultdict
 
 from musicbot.playlist import Playlist
 from musicbot.player import MusicPlayer
+from musicbot.queryer import ServerQueryer
 from musicbot.config import Config, ConfigDefaults
 from musicbot.permissions import Permissions, PermissionsDefaults
 from musicbot.utils import load_file, write_file, sane_round_int
@@ -68,6 +69,7 @@ class MusicBot(discord.Client):
     def __init__(self, config_file=ConfigDefaults.options_file, perms_file=PermissionsDefaults.perms_file):
         self.players = {}
         self.the_voice_clients = {}
+        self.queryer = None
         self.locks = defaultdict(asyncio.Lock)
         self.voice_client_connect_lock = asyncio.Lock()
         self.voice_client_move_lock = asyncio.Lock()
@@ -99,8 +101,12 @@ class MusicBot(discord.Client):
         try:
             if not self.http.session.closed:
                 self.http.session.close()
-        except:
-            pass
+        except: pass
+
+        try:
+            if not self.aiosession.closed:
+                self.aiosession.close()
+        except: pass
 
     # TODO: Add some sort of `denied` argument for a message to send when someone else tries to use it
     def owner_only(func):
@@ -381,7 +387,7 @@ class MusicBot(discord.Client):
             self.players[server.id] = player
 
         return self.players[server.id]
-
+    
     async def on_player_play(self, player, entry):
         await self.update_now_playing(entry)
         player.skip_state.reset()
@@ -454,6 +460,34 @@ class MusicBot(discord.Client):
 
     async def on_player_entry_added(self, playlist, entry, **_):
         pass
+
+    async def on_query_finished(self, message, queryer):
+        redOnline = [p[0] for p in queryer.red if p[1] != 'Offline']        
+        greenOnline = [p[0] for p in queryer.green if p[1] != 'Offline']        
+        blueOnline = [p[0] for p in queryer.blue if p[1] != 'Offline']
+        lenr = len(redOnline)
+        leng = len(greenOnline)
+        lenb = len(blueOnline)
+        maxlen = max(lenr, leng, lenb)
+
+        responseText = ('%s - Current TribeWarfare Server Status:'
+                        '\n```' 
+                        '\nRED TRIBE\t\tGREEN TRIBE\t\tBLUE TRIBE' 
+                        '\n%d Online\t\t %d Online\t\t  %d Online'
+                        '\n'
+                        % (message.author.mention, lenr, leng, lenb))
+        iterr = iter(redOnline)
+        iterg = iter(greenOnline)
+        iterb = iter(blueOnline)
+        responseText += ''.join('\n%s\t\t%s\t\t%s' % (str(next(iterr, ''))[:10].ljust(10), str(next(iterg, ''))[:10].ljust(10), str(next(iterb, ''))[:10].ljust(10))
+                         for i in range(0, maxlen))
+        responseText += ('\n```'
+                         'Raid Status:'
+                         '\nRED TRIBE: %s\tGREEN TRIBE: %s\tBLUE TRIBE: %s' % (
+                             ':white_check_mark:' if lenr >= self.config.minimum_to_raid else ':no_entry_sign:',
+                             ':white_check_mark:' if leng >= self.config.minimum_to_raid else ':no_entry_sign:',
+                             ':white_check_mark:' if lenb >= self.config.minimum_to_raid else ':no_entry_sign:'))
+        await self.safe_send_message(message.channel, responseText, expire_in=30)
 
     async def update_now_playing(self, entry=None, is_paused=False):
         game = None
@@ -752,6 +786,9 @@ class MusicBot(discord.Client):
                 print("Owner not found in a voice channel, could not autosummon.")
 
         print()
+
+        self.queryer = ServerQueryer(self) \
+                .on('query-finished', self.on_query_finished)
         # t-t-th-th-that's all folks!
 
     async def cmd_help(self, command=None):
@@ -1972,6 +2009,19 @@ class MusicBot(discord.Client):
 
         # return Response(reply_text, delete_after=30)
 
+    async def cmd_status(self, message):
+        """
+        Usage:
+            {command_prefix}status
+
+        Displays the currently online players for the TribeWarfare server.
+        Also shows whether or not a tribe's capitol is raidable (>=5 online).
+        """
+        if not self.queryer:
+            raise exceptions.CommandError("Bot still initializing, please wait 30 secs, then try again.", expire_in=30)
+        self.queryer.query(message)
+        await self.send_typing(message.channel)
+
     @owner_only
     async def cmd_setname(self, leftover_args, name):
         """
@@ -2075,7 +2125,7 @@ class MusicBot(discord.Client):
         if not handler:
             return
 
-        if message.channel.is_private:
+        if message.channel.is_private and command != 'status':
             if not (message.author.id == self.config.owner_id and command == 'joinserver'):
                 await self.send_message(message.channel, 'You cannot use this bot in private messages.')
                 return
